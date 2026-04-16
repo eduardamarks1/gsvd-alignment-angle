@@ -42,8 +42,6 @@ The purpose is **not** state-of-the-art classification, but rather an interpreta
 
 ## What This Repository Contains
 
-Possible contents of the repository include:
-
 - GSVD preprocessing code
 - sample scoring with the alignment angle
 - histogram and distribution plots
