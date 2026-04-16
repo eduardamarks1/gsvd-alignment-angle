@@ -1,4 +1,3 @@
-=
 
 # GSVD for Geometry-Grounded Dataset Comparison: An Alignment Angle Is All You Need
 
@@ -6,7 +5,6 @@ This repository contains experiments for **geometry-grounded dataset comparison*
 
 Our central object is the co-span relation which allows us to study vectors jointly explained by two datasets. From this relation, we define an interpretable **alignment angle** theta(z) that indicates whether a sample is more naturally aligned with dataset A, dataset B, or shared by both.
 
----
 
 ## Main Idea
 
@@ -18,13 +16,9 @@ Many dataset comparison methods output a single number for a pair of datasets. W
 
 The same GSVD frame also reveals representative extreme directions, making the geometry interpretable.
 
----
-
 ## Method Overview
 
 Given two matrices A and B, we use the GSVD decomposition to construct a coordinate system adapted to the joint geometry of the two datasets. 
-
----
 
 ## Experiments
 
@@ -45,7 +39,6 @@ Example observations:
 
 The purpose is **not** state-of-the-art classification, but rather an interpretable diagnostic of relative dataset geometry.
 
----
 
 ## What This Repository Contains
 
@@ -56,8 +49,6 @@ Possible contents of the repository include:
 - histogram and distribution plots
 - reconstruction of representative GSVD directions
 - experiment scripts for MNIST digit-pair comparisons
-
----
 
 ## Authors and Acknowledgments
 
