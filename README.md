@@ -5,6 +5,7 @@ This repository contains experiments for **geometry-grounded dataset comparison*
 
 Our central object is the co-span relation which allows us to study vectors jointly explained by two datasets. From this relation, we define an interpretable **alignment angle** theta(z) that indicates whether a sample is more naturally aligned with dataset A, dataset B, or shared by both.
 
+Paper Source: [GSVD for Geometry-Grounded Dataset Comparison: An Alignment Angle Is All You Need](https://arxiv.org/abs/2603.10283)
 
 ## Main Idea
 
@@ -58,7 +59,7 @@ This work was developed by:
 - Daniel S. Menasche
 - Heudson Mirandola
 
-We also thank **Júlia Motta** for her important contribution to the experimental pipeline, especially in organizing the outputs of the Julia GSVD implementation.
+We also thank **Júlia Motta** for her important contribution to the experimental pipeline, especially in reorganizing the outputs of the Julia(language) GSVD implementation.
 
 The Julia implementation does not naturally return the GSVD factors in the same organization adopted in our article. To match our formulation, it was necessary to apply permutations to the block structures of the matrices originally denoted here as **D1** and **D2** (corresponding to **C** and **S** in the paper), followed by a reordering step so that the values appearing in the pseudoinverses are arranged consistently with the alignment-angle interpretation, increasing from \(0^\circ\) to \(90^\circ\).
 
