@@ -64,6 +64,5 @@ The Julia implementation does not naturally return the GSVD factors in the same 
 
 Some of the ideas that guided this organization were inspired by **Graphical Linear Algebra (GLA)**, particularly in thinking about block structure, composition, and the interpretation of the resulting operators.
 
-### Naming note
-
+### NOTE
 In the current experiments, we still refer to the GSVD diagonal factors as **D1** and **D2**, which was our original notation. We plan to rename them to **C** and **S** in the codebase as well, to make the implementation consistent with the notation used in the article and improve clarity for future readers.
