@@ -1,0 +1,1484 @@
+=== CELL 1 (code) ===
+using Printf
+using LinearAlgebra
+using CSV, DataFrames
+
+#=
+Make_D1_D2
+
+INPUT:bl::Int, br::Int, wl::Int, wr::Int, r::Int, D1_til::DiagonalMatrix,
+D2_til::DiagonalMatrix
+
+GOAL: Build the GSVD matrices D1 and D2 based on the block structure
+defined by bl, br, wl, wr, r, and the "central" matrices D1_til and
+D2_til.
+
+OUTPUT: D1::Matrix, D2::Matrix
+
+=#
+
+function Make_D1_D2(bl,br,wl,wr,r, D1_til, D2_til)
+    D1= [I(bl)        zeros(bl,r) zeros(bl,br);
+         zeros(r,bl)  D1_til      zeros(r,br);
+         zeros(wl,bl) zeros(wl,r) zeros(wl,br)]
+
+    #D2 in our format
+    D2= [zeros(wr,bl) zeros(wr,r) zeros(wr,br);
+         zeros(r,bl)  D2_til      zeros(r,br);
+         zeros(br,bl) zeros(br,r) I(br)]
+
+    return D1, D2
+end
+
+#=
+Make_A_B
+
+INPUT:bl::Int, br::Int, wl::Int, wr::Int, r::Int, D1_til::Matrix,
+D2_til::Matrix, H::Matrix, U::Matrix, V::Matrix
+
+GOAL: Build A and B from the decomposition produced by the GSVD, using the block
+structure defined by bl, br, wl, wr, r, the "central" matrices D1_til and
+D2_til (to create D1 and D2), and H (surjective), U and V (orthogonal) to create A and B.
+
+OUTPUT: A::Matrix, B::Matrix
+
+=#
+
+function Make_A_B(bl,br,wl,wr,r,D1_til,D2_til,H,U,V)
+    D1,D2 = Make_D1_D2(bl,br,wl,wr,r, D1_til, D2_til)
+
+    A = U * D1 * H
+    B = V * D2 * H
+
+    return A, B
+end
+
+#=
+Our_SVD
+
+INPUT: A::Matrix, B::Matrix
+
+GOAL: Decompose A and B using a modified GSVD, because the D2 returned by Julia in svd(A,B) is
+not blocked in the way we defined in Make_D1_D2. For this, the permutation matrix P is used to produce V_til. D2_our is D2 in our blocked format.
+For this reason, NEVER USE THE D2 RETURNED DIRECTLY BY JULIA WITHOUT APPLYING THIS PERMUTATION.
+
+OUTPUT: U::Matrix, V_til::Matrix, H::Matrix, D1_til::Matrix, D2_til::Matrix, D1::Matrix, D2_our::Matrix, bl::Int, br::Int, wl::Int, wr::Int, r::Int, P::Matrix, V::Matrix
+
+=#
+
+function Our_SVD(A,B)
+    bl,br,wl,wr,r = wire_size(A,B)
+    U, V, Q, D1, D2_julia, R0 = svd(A, B)
+
+    P, D2_our = permutation(wr,r,br, D2_julia)
+    V_til = V * P #Changing variable to fix line changes in D2
+
+    #Selects D1_tilde and D2_tilde
+    D1_til = D1[bl+1:bl+r, bl+1:bl+r]
+    D2_til = D2_our[wr+1:wr+r, bl+1:bl+r]
+
+    H = R0 * Q'
+
+    return U, V_til, H, D1_til, D2_til, D1, D2_our, bl, br, wl, wr, r, P, V
+end
+
+#=
+TO DO: clarify the wire_size and permutation functions with Júlia
+=#
+function wire_size(A,B)
+    m,.. = size(A)
+    p,.. = size(B)
+    .., .., .., D1, D2, .. = svd(A, B)
+    ..,k_mais_l = size(D1)
+
+    #Counting k: D1 is a m-by-(k_mais_l) diagonal matrix with 1s in the first k entries,
+    k = 0
+    for i in 1:min(m, k_mais_l)
+        if D1[i, i] == 1
+            k += 1
+        else
+            k += 0
+        end
+    end
+
+    l = k_mais_l-k
+
+    #Counting r: D2 is a matrix whose upper-right l-by-l block is diagonal,
+    #   with the first r entries belonging to D2_til and the rest 1s.
+    r = 0
+    for i in 1:l
+        if D2[i, k+i] != 1
+            r += 1
+        else
+            r += 0
+        end
+    end
+
+    bl = k
+    br = l - r
+    wl = m - k - r
+    wr = p - l
+
+    return bl,br,wl,wr,r
+end
+
+function permutation(wr,r,br, D2_julia)
+    P = [zeros(r,wr)  I(r)        zeros(r,br);
+         zeros(br,wr) zeros(br,r) I(br);
+         I(wr)        zeros(wr,r) zeros(wr,br)]
+
+    P_til = [zeros(wr,r) zeros(wr,br) I(wr);
+             I(r)        zeros(r,br)  zeros(r,wr);
+             zeros(br,r) I(br)        zeros(br,wr)]
+
+    D2_our = P_til * D2_julia
+
+    return P, D2_our
+end
+
+
+=== CELL 2 (code) ===
+using MLDatasets
+using Random
+using Statistics
+using LinearAlgebra
+using Plots
+
+function get_MNIST_vectors(digit, k)
+    imgs, labels = MNIST(split=:test)[:]
+
+    imgs = Float64.(imgs) ./ 255
+
+    idx = findall(labels .== digit)
+
+    if length(idx) < k
+        error("There are not enough images for the chosen digit.")
+    end
+    idx = Random.shuffle(idx)[1:k]
+    X = transpose(hcat([vec(imgs[:, :, i]) for i in idx]...))
+    return X
+end
+
+
+function create_MNIST_matrices(digitA, digitB, n, m)
+
+    imgs, labels = MNIST(split=:train)[:]
+
+     # normalize
+    imgs = Float64.(imgs) ./ 255 
+
+    # find the digits
+    idxA = findall(labels .== digitA)
+    idxB = findall(labels .== digitB)
+
+    # handle errors
+    if length(idxA) < n || length(idxB) < m
+        error("There are not enough images for the chosen digits.")
+    end
+
+    # shuffle the indices
+    Random.seed!(1234)  
+    idxA = Random.shuffle(idxA)[1:n]
+    idxB = Random.shuffle(idxB)[1:m]
+
+     # Vectorize and stack as columns
+    A = hcat([vec(imgs[:, :, i]) for i in idxA]...)
+    B = hcat([vec(imgs[:, :, i]) for i in idxB]...)
+    
+    # transform into row vectors 
+    #A = transpose(hcat([vec(imgs[:, :, i]) for i in idxA]...))
+    #B = transpose(hcat([vec(imgs[:, :, i]) for i in idxB]...))
+
+    return A, B
+end
+
+
+function plot_matrix(M, titulo, k=nothing, media=nothing, savepath=nothing, linha_ini=nothing, linha_fim=nothing)
+    # We now treat "linha_ini/linha_fim" as a COLUMN RANGE (images)
+    n_cols_total = size(M, 2)
+
+    col_ini = linha_ini === nothing ? 1 : linha_ini
+    col_fim = linha_fim === nothing ? n_cols_total : linha_fim
+
+    col_ini = clamp(col_ini, 1, n_cols_total)
+    col_fim = clamp(col_fim, col_ini, n_cols_total)
+
+    # Column submatrix (images)
+    M_exibir = M[:, col_ini:col_fim]
+
+    # If a mean is provided, add it to each column (mean is a 784-vector)
+    if media !== nothing
+        media_vec = vec(media)  # garante forma (784,)
+        @assert length(media_vec) == size(M_exibir, 1) "mean must have length equal to the number of rows (pixels) of M"
+        M_exibir = M_exibir .+ media_vec
+    end
+
+    # Number of images to plot
+    k_imgs = size(M_exibir, 2)
+    if k !== nothing
+        k_imgs = min(k_imgs, k)
+        M_exibir = M_exibir[:, 1:k_imgs]
+    end
+
+    max_por_linha = 10
+    ncols = min(k_imgs, max_por_linha)
+    nrows = ceil(Int, k_imgs / ncols)
+
+    plt = plot(layout = (nrows, ncols), size = (120 * ncols, 120 * nrows), title = titulo)
+
+    for i in 1:k_imgs
+        # each column is a 28x28 image
+        img = reshape(M_exibir[:, i], (28, 28))
+        heatmap!(
+            plt[i],
+            img[:, end:-1:1]',
+            axis = nothing,
+            colorbar = false,
+            framestyle = :none,
+            aspect_ratio = 1,
+            c = :viridis
+        )
+    end
+
+    display(plt)
+    if savepath !== nothing
+        savefig(plt, savepath)
+    end
+end
+
+=== CELL 7 (code) ===
+function set_to_0_closest_to_45(D1, D2, k)
+    angles = get_angles_D1(D1)
+
+    # find the index of the angle closest to 45° (the central one)
+    idx_central = argmin(abs.(angles .- 45))
+
+    D1r = copy(D1)
+    D2r = copy(D2)
+
+    # always zero out the central term
+    D1r[:, idx_central] .= 0
+    D2r[:, idx_central] .= 0
+
+    # split indices on the left (<45) and right (>45)
+    left = findall(a -> a < 45, angles)
+    right = findall(a -> a > 45, angles)
+
+    # sort from closest to 45 to farthest
+    sort!(left, by = i -> -angles[i])
+    sort!(right, by = i -> angles[i])
+
+    # remove k symmetric pairs
+    for i in 1:min(k, min(length(left), length(right)))
+        li = left[i]
+        ri = right[i]
+        D1r[:, li] .= 0
+        D2r[:, li] .= 0
+        D1r[:, ri] .= 0
+        D2r[:, ri] .= 0
+    end
+
+    return D1r, D2r
+end
+
+
+=== CELL 8 (code) ===
+function get_all_MNIST(digit; split=:test)
+    imgs, labels = MNIST(split=split)[:] # get all images and labels from the test set
+    imgs = Float64.(imgs) ./ 255 # normalize
+
+    idx = findall(labels .== digit) # get the digit indices
+
+    X = hcat([vec(imgs[:, :, i]) for i in idx]...) # place the images as columns
+
+    return X
+end
+
+=== CELL 9 (code) ===
+#=
+infer_block_sizes
+
+INPUT:  D1::Matrix, D2::Matrix produced by Make_D1_D2 (or sort_and_rebuild,
+        which preserves the same layout).
+
+GOAL:   Recover (bl, br, wl, wr, r) from D1, D2 alone, without needing to keep
+        the original block sizes around. Uses the structural invariants of the
+        Make_D1_D2 layout: D1 has I(bl) at the top-left and D2 has I(br) at the
+        bottom-right; the middle block D1_til / D2_til has strictly fractional
+        diagonal entries (the canonical cosines / sines, in (0, 1)).
+
+OUTPUT: bl::Int, br::Int, wl::Int, wr::Int, r::Int
+=#
+function infer_block_sizes(D1, D2)
+    nrows1, ncols1 = size(D1)
+    nrows2, ncols2 = size(D2)
+    @assert ncols1 == ncols2 "D1 and D2 must share the column count (bl+r+br)"
+
+    bl = 0
+    for i in 1:min(nrows1, ncols1)
+        if D1[i, i] == 1
+            bl += 1
+        else
+            break
+        end
+    end
+
+    br = 0
+    for j in 0:min(nrows2, ncols2) - 1
+        if D2[nrows2 - j, ncols2 - j] == 1
+            br += 1
+        else
+            break
+        end
+    end
+
+    r  = ncols1 - bl - br
+    wl = nrows1 - bl - r
+    wr = nrows2 - br - r
+
+    @assert r  >= 0 "Inferred r < 0; D1, D2 are not in Make_D1_D2 layout"
+    @assert wl >= 0 "Inferred wl < 0; D1 row count does not match bl+r+wl"
+    @assert wr >= 0 "Inferred wr < 0; D2 row count does not match wr+r+br"
+
+    return bl, br, wl, wr, r
+end
+
+
+#=
+zero_pure_blocks
+
+INPUT:  D1::Matrix, D2::Matrix, bl::Int, br::Int, wl::Int, wr::Int, r::Int
+
+GOAL:   Zero the pure-A identity block I(bl) at the top-left of D1 and the
+        pure-B identity block I(br) at the bottom-right of D2, preserving the
+        exact block layout produced by Make_D1_D2. This restricts theta(z) to
+        the intersection col(A) cap col(B): only the shared middle block
+        (D1_til, D2_til) keeps contributing.
+
+OUTPUT: D1_int::Matrix, D2_int::Matrix with the same sizes as D1 and D2.
+=#
+function zero_pure_blocks(D1, D2, bl, br, wl, wr, r)
+    @assert size(D1) == (bl + r + wl, bl + r + br) "size(D1)=$(size(D1)) does not match (bl+r+wl, bl+r+br)=$((bl+r+wl, bl+r+br))"
+    @assert size(D2) == (wr + r + br, bl + r + br) "size(D2)=$(size(D2)) does not match (wr+r+br, bl+r+br)=$((wr+r+br, bl+r+br))"
+
+    D1_int = copy(D1)
+    D2_int = copy(D2)
+
+    if bl > 0
+        D1_int[1:bl, 1:bl] .= 0
+    end
+
+    if br > 0
+        D2_int[wr+r+1:wr+r+br, bl+r+1:bl+r+br] .= 0
+    end
+
+    @assert size(D1_int) == size(D1)
+    @assert size(D2_int) == size(D2)
+
+    if r > 0
+        @assert D1_int[bl+1:bl+r, bl+1:bl+r] == D1[bl+1:bl+r, bl+1:bl+r] "D1_til block was modified"
+        @assert D2_int[wr+1:wr+r,  bl+1:bl+r] == D2[wr+1:wr+r,  bl+1:bl+r] "D2_til block was modified"
+    end
+
+    if bl > 0
+        @assert iszero(D1_int[1:bl, 1:bl]) "I(bl) was not zeroed"
+    end
+    if br > 0
+        @assert iszero(D2_int[wr+r+1:wr+r+br, bl+r+1:bl+r+br]) "I(br) was not zeroed"
+    end
+
+    return D1_int, D2_int
+end
+
+
+#=
+to_intersection
+
+INPUT:  D1::Matrix, D2::Matrix in Make_D1_D2 layout.
+
+GOAL:   Convenience wrapper. Calls infer_block_sizes to recover the block
+        sizes and then zero_pure_blocks. All classify leaf functions invoke
+        this at entry so theta(z) is always computed against the intersection
+        col(A) cap col(B) (the hypothesis of the thesis: Z in A cap B).
+
+OUTPUT: D1_int::Matrix, D2_int::Matrix.
+=#
+function to_intersection(D1, D2)
+    bl, br, wl, wr, r = infer_block_sizes(D1, D2)
+    return zero_pure_blocks(D1, D2, bl, br, wl, wr, r)
+end
+
+
+=== CELL 46 (code) ===
+function find_cutoff_indices(v, lim_sup, lim_inf)
+    last_above = findlast(abs.(v) .> lim_sup)
+    first_below = findfirst(x -> x < lim_inf, v)
+    return (first_below, last_above)
+end
+
+function show_all(v)
+    for i in 1:length(v)
+        println("[$i] = ", v[i])
+    end
+end
+
+=== CELL 56 (code) ===
+using FileIO
+
+function gif_matrix(
+    M,
+    titulo;
+    media=nothing,
+    savepath="scroll_imagens.gif",
+    fps=nothing,
+    colormap=:viridis,
+    ini=nothing,
+    fim=nothing
+)
+    n_total = size(M, 2)  # We now use the number of columns
+
+    # Adjust start and end with default values
+    ini = ini === nothing ? 1 : clamp(ini, 1, n_total)
+    fim = fim === nothing ? n_total : clamp(fim, ini, n_total)
+
+    # Submatrix for display (using columns)
+    M_exibir = M[:, ini:fim]
+
+    # Aplicar mean, se fornecida
+    if media !== nothing
+        media_vec = vec(media)  # ensure that it is a 784-vector (correct size)
+        @assert length(media_vec) == size(M_exibir, 1) "media deve ter comprimento igual ao nº de linhas de M"
+        M_exibir = M_exibir .+ media_vec
+    end
+
+    # Adjust the number of images to display
+    k = size(M_exibir, 2) # now using the number of columns
+
+    anim = @animate for i in 1:k
+        img = reshape(M_exibir[:, i], (28, 28))  # We now take the i-th column
+        heatmap(
+            img[:, end:-1:1]',
+            axis=nothing,
+            colorbar=false,
+            framestyle=:none,
+            aspect_ratio=1,
+            title="$titulo\nImagem $(ini + i - 1) de $fim",
+            c=colormap
+        )
+    end
+
+    gif(anim, savepath, fps=fps)
+end
+
+
+=== CELL 69 (code) ===
+function classify(v, digitA, digitB, D1, D2, H)
+    D1, D2 = to_intersection(D1, D2)  # restrict theta(z) to col(A) cap col(B)
+    # Solve H' * c = v
+    c = vec(H' \ v)
+
+    # Projections onto the cosine and sine bases
+    wA = D1 * c
+    wB = D2 * c
+
+    # Compute the classifier
+    classificador = norm(wB) / norm(wA)
+    resultado = classificador > 1.0 ? digitB : digitA
+
+    # Compute the angle in radians and convert it to degrees
+    theta_rad = atan(norm(wB), norm(wA))
+    theta_deg = theta_rad * (180 / π)
+
+    return resultado, theta_deg
+end
+
+=== CELL 71 (code) ===
+digit, theta = classify(v1, digitA,digitB, D1_new, D2_our_new, H_new)
+
+=== CELL 73 (code) ===
+digit, theta = classify(v2, digitA,digitB, D1_new, D2_our_new, H_new)
+
+=== CELL 74 (markdown) ===
+## Classifier with $\theta(z)$ — MNIST digits (balanced)
+
+Clean, balanced pipeline for the $\theta(z)$ histograms.
+
+
+=== CELL 75 (code) ===
+# ---------------------------------------------------------------------------
+# Sampling helpers (MNIST digits)
+# ---------------------------------------------------------------------------
+
+# Sample `nA` columns for digitA and `mB` columns for digitB from `split`.
+# Pass nA == mB for a balanced pair, or nA != mB for an asymmetric one
+# (e.g. the paper's 900/800). Each image is vectorized to R^784 and
+# normalized to [0, 1].
+function sample_digit_pair(digitA, digitB, nA, mB; split=:train, seed=1234)
+    imgs, labels = MNIST(split=split)[:]
+    imgs = Float64.(imgs) ./ 255
+
+    idxA = findall(labels .== digitA)
+    idxB = findall(labels .== digitB)
+
+    if length(idxA) < nA || length(idxB) < mB
+        error("Not enough images (need $nA of $digitA, $mB of $digitB; have $(length(idxA)), $(length(idxB)) in split=$split).")
+    end
+
+    Random.seed!(seed)
+    idxA = Random.shuffle(idxA)[1:nA]
+    idxB = Random.shuffle(idxB)[1:mB]
+
+    A = hcat([vec(imgs[:, :, i]) for i in idxA]...)
+    B = hcat([vec(imgs[:, :, i]) for i in idxB]...)
+    return A, B
+end
+
+# Largest balanced count available for the pair in `split`.
+function balanced_count(digitA, digitB; split=:test)
+    _, labels = MNIST(split=split)[:]
+    return min(length(findall(labels .== digitA)), length(findall(labels .== digitB)))
+end
+
+# Pretty-print per-class results.
+function display_results(name_digit, hits, total, accuracy, mean_angles, deviation_angles)
+    println("\n=== Results for digit $name_digit ===")
+    println("Correct: $hits out of $total")
+    println("Accuracy: $(round(accuracy * 100, digits=2))%")
+    println("Mean of the angles: $(round(mean_angles, digits=2))°")
+    println("Standard deviation of the angles: $(round(deviation_angles, digits=2))°")
+end
+
+=== CELL 76 (code) ===
+# ---------------------------------------------------------------------------
+# GSVD base preparation (single, unified function)
+# ---------------------------------------------------------------------------
+
+# Build the GSVD base from `split` (default :train) using `n` samples of digitA
+# and `m` samples of digitB. Use n == m for a balanced base, or n != m for an
+# asymmetric one (e.g. the paper's 900/800). Returns the centered A, B (for CKA),
+# their means, and the sorted GSVD factors (U, V, D1, D2, H).
+function prepare_data(digitA, digitB; n=900, m=800, split=:train, seed=1234)
+    A_local, B_local = sample_digit_pair(digitA, digitB, n, m; split=split, seed=seed)
+    media_A_local = mean(A_local, dims=2) |> vec
+    media_B_local = mean(B_local, dims=2) |> vec
+    A_centered = A_local .- media_A_local
+    B_centered = B_local .- media_B_local
+    U_svd, V_til_svd, H_svd, D1_til_svd, D2_til_svd, D1_svd, D2_our_svd, bl, br, wl, wr, rv, P, Vo = Our_SVD(A_centered', B_centered')
+    U_s, V_s, D1_til_s, D2_til_s, D1_s, D2_our_s, H_s = sort_and_rebuild(
+        U_svd, V_til_svd, D1_svd, D2_our_svd, D1_til_svd, D2_til_svd, H_svd, bl, br, wl, wr, rv)
+    return A_centered, B_centered, media_A_local, media_B_local, U_s, V_s, D1_s, D2_our_s, H_s
+end
+
+=== CELL 77 (code) ===
+# ---------------------------------------------------------------------------
+# Balanced theta(z) classification
+# ---------------------------------------------------------------------------
+
+function classify_balanced_set(X, expected_digit, D1, D2, H; threshold=1.0, expected_side=:A)
+    D1, D2 = to_intersection(D1, D2)
+
+    hits = 0
+    total = size(X, 2)
+    angles = Float64[]
+
+    println("Classifying $total balanced images of digit $expected_digit...")
+
+    for i in 1:total
+        v = X[:, i]
+        c = vec(H' \ v)
+        w1 = D1 * c
+        w2 = D2 * c
+        ratio = norm(w2) / norm(w1)
+
+        theta_deg = atan(norm(w2), norm(w1)) * (180 / pi)
+        push!(angles, theta_deg)
+
+        prediction = expected_side == :A ? (ratio < threshold ? expected_digit : -1) :
+                                            (ratio > threshold ? expected_digit : -1)
+        if prediction == expected_digit
+            hits += 1
+        end
+    end
+
+    return hits, hits / total, angles, mean(angles), std(angles)
+end
+
+# Build a balanced test set (largest count available, equalized) and classify
+# both classes.
+function test_classification_balanced(digitA, digitB, D1, D2, H; threshold=1.0, split=:test, seed=4321)
+    n_test = balanced_count(digitA, digitB; split=split)
+    println("Testing balanced classification between digits $digitA and $digitB ($n_test instances each, split=$split).")
+    X_A, X_B = sample_digit_pair(digitA, digitB, n_test, n_test; split=split, seed=seed)
+
+    hits_A, acc_A, angles_A, mean_A, dev_A = classify_balanced_set(X_A, digitA, D1, D2, H; threshold=threshold, expected_side=:A)
+    display_results(digitA, hits_A, n_test, acc_A, mean_A, dev_A)
+
+    hits_B, acc_B, angles_B, mean_B, dev_B = classify_balanced_set(X_B, digitB, D1, D2, H; threshold=threshold, expected_side=:B)
+    display_results(digitB, hits_B, n_test, acc_B, mean_B, dev_B)
+
+    overall = (hits_A + hits_B) / (2 * n_test)
+    println("\n=== Balanced Overall Summary ===")
+    println("Overall accuracy: $(round(overall * 100, digits=2))%")
+    return angles_A, angles_B, overall
+end
+
+=== CELL 78 (code) ===
+function plot_angle_histogram(angles_A, angles_B, digit_A, digit_B; 
+                                  bins=30, alpha=0.6, figsize=(1200, 500))
+    
+    # Compute statistics
+    mean_A = mean(angles_A)
+    mean_B = mean(angles_B)
+    deviation_A = std(angles_A)
+    deviation_B = std(angles_B)
+    
+    # Create the histogram with both sets - flattened format for the paper
+    p = histogram(angles_A, 
+                 bins=bins, 
+                 alpha=alpha, 
+                 label="Digit $digit_A (σ=$(round( deviation_A, digits=1))°)", 
+                 color=:steelblue,
+                 xlabel="Angle θ (degrees)",
+                 xlims=(0, 90),
+                 ylabel="Frequency",
+                 ylims=(0, 400),
+                 title="",  # No title - it will be the caption in LaTeX
+                 size=figsize,
+                 # Increase font sizes
+                 guidefontsize=24,
+                 tickfontsize=18,
+                 legendfontsize=16,
+                 left_margin=12Plots.mm,
+                 bottom_margin=12Plots.mm,
+                 right_margin=4Plots.mm,
+                 top_margin=4Plots.mm,
+                 dpi=300,  # High resolution for the paper
+                 framestyle=:box)
+    
+    # Add the second histogram
+    histogram!(p, angles_B, 
+              bins=bins, 
+              alpha=alpha, 
+              label="Digit $digit_B (σ=$(round( deviation_B, digits=1))°)", 
+              color=:coral)
+    
+    # Add vertical lines for the means - thicker and more visible
+    vline!([mean_A], 
+           color=:steelblue, 
+           linestyle=:dash, 
+           linewidth=4,
+           label="Mean $digit_A: $(round(mean_A, digits=1))°")
+    
+    vline!([mean_B], 
+           color=:coral, 
+           linestyle=:dash, 
+           linewidth=4,
+           label="Mean $digit_B: $(round(mean_B, digits=1))°")
+    
+    # Position the legend
+    plot!(legend=:topright, 
+          legendfontsize=14,
+          legend_background_color=:white,
+          legend_foreground_color=:black)
+    
+    # Save as PNG
+    filename = ".\\distribution_of_theta_$(digit_A)_$(digit_B).png"
+    savefig(p, filename)
+    println("Image saved at: $filename")
+    
+    return p
+end
+
+
+=== CELL 79 (code) ===
+# ---------------------------------------------------------------------------
+# Per-pair driver: base from train (n, m) -> balanced test -> histogram
+# ---------------------------------------------------------------------------
+all_histograms = []
+all_angles_data = []
+
+# n == m  -> balanced base ; n != m -> asymmetric base (e.g. n=900, m=800).
+function classify_more_balanced(digitA, digitB; n=900, m=900, base_split=:train, test_split=:test,
+                                base_seed=1234, test_seed=4321, threshold=1.0)
+    A_prep, B_prep, media_A_prep, media_B_prep, U_prep, V_prep, D1_prep, D2_prep, H_prep =
+        prepare_data(digitA, digitB; n=n, m=m, split=base_split, seed=base_seed)
+    println("[classify_more_balanced] Base from split=$base_split with n=$n ($digitA), m=$m ($digitB).")
+
+    angles_A, angles_B, overall = test_classification_balanced(
+        digitA, digitB, D1_prep, D2_prep, H_prep; threshold=threshold, split=test_split, seed=test_seed)
+
+    p = plot_angle_histogram(angles_A, angles_B, digitA, digitB)
+    push!(all_histograms, p)
+    push!(all_angles_data, (digitA=digitA, digitB=digitB, angles_A=angles_A, angles_B=angles_B))
+    return angles_A, angles_B, overall, p
+end
+
+function plot_all_histograms()
+    n_plots = length(all_histograms)
+    if n_plots == 0
+        println("No histogram to plot.")
+        return
+    end
+    ncols = min(3, n_plots)
+    nrows = ceil(Int, n_plots / ncols)
+    combined = plot(all_histograms..., layout=(nrows, ncols), size=(800*ncols, 600*nrows))
+    display(combined)
+    return combined
+end
+
+function save_all_angles_to_csv(filename="angles_results_all_pairs.csv")
+    if isempty(all_angles_data)
+        println("No data to save.")
+        return
+    end
+    rows = []
+    for data in all_angles_data
+        for ang in data.angles_A
+            push!(rows, (digitA=data.digitA, digitB=data.digitB, digit_class=data.digitA, angle=ang))
+        end
+        for ang in data.angles_B
+            push!(rows, (digitA=data.digitA, digitB=data.digitB, digit_class=data.digitB, angle=ang))
+        end
+    end
+    df = DataFrame(rows)
+    CSV.write(filename, df)
+    println("Data saved to $filename")
+    return df
+end
+
+=== CELL 80 (code) ===
+paper_pairs = [(1, 5), (0, 7), (4, 9), (3, 9)]
+
+# reset accumulators so previous runs don't bleed in
+all_histograms = []
+all_angles_data = []
+
+for (dA, dB) in paper_pairs
+    println("\n>>> Pair: digits $dA vs $dB")
+    classify_more_balanced(dA, dB)
+end
+
+plot_all_histograms()
+save_all_angles_to_csv("angles_results_all_pairs.csv")
+
+=== CELL 81 (markdown) ===
+### Posterior probability of class given $\theta$
+
+For each $\theta$ bin, the fraction of samples that belong to digit $A$ vs digit
+$B$ — an empirical $P(\text{class} \mid \theta)$. Because it is a per-bin ratio
+it **is** sensitive to class imbalance, so it uses the same **balanced**
+base/test as the histograms above.
+
+=== CELL 82 (code) ===
+function plot_posterior_angle_distribution(
+    angles_A, angles_B, digit_A, digit_B;
+    bins=30, figsize=(1200, 500)
+)
+
+    # =========================
+    # Shared bins
+    # =========================
+    angles = vcat(angles_A, angles_B)
+    edges = range(0, 90, length=bins+1)
+    centers = (edges[1:end-1] .+ edges[2:end]) ./ 2
+    width = edges[2] - edges[1]
+
+    # =========================
+    # Counts per class
+    # =========================
+    counts_A = zeros(Float64, bins)
+    counts_B = zeros(Float64, bins)
+
+    for θ in angles_A
+        i = clamp(searchsortedlast(edges, θ), 1, bins)
+        counts_A[i] += 1
+    end
+
+    for θ in angles_B
+        i = clamp(searchsortedlast(edges, θ), 1, bins)
+        counts_B[i] += 1
+    end
+
+    # =========================
+    # Per-bin normalization
+    # =========================
+    total = counts_A .+ counts_B
+    empty_bins = total .== 0
+    total[empty_bins] .= 1.0   # avoid division by zero
+
+    post_A = counts_A ./ total
+    post_B = counts_B ./ total
+
+    # =========================
+    # Background for empty bins
+    # =========================
+    p = plot(
+        xlabel = "Angle θ (degrees)",
+        ylabel = "Posterior probability",
+        ylim = (0, 1),
+        xlim = (0, 90),
+        size = figsize,
+        xticks=0:15:90,
+        guidefontsize = 24,
+        tickfontsize = 18,
+        legendfontsize = 16,
+        left_margin = 12Plots.mm,
+        bottom_margin = 12Plots.mm,
+        right_margin = 4Plots.mm,
+        top_margin = 4Plots.mm,
+        dpi = 300,
+        framestyle = :box,
+        legend = :topright,
+        legend_background_color = :white,
+        legend_foreground_color = :black
+    )
+
+    # Add light blue/orange bars for empty bins
+    for i in 1:bins
+        if empty_bins[i]
+            color = centers[i] < 45 ? :deepskyblue : :lightsalmon
+            bar!(
+                [centers[i]],
+                [1.0],
+                bar_width = width,
+                color = color,
+                alpha = 0.3,
+                label = ""
+            )
+        end
+    end
+
+    # =========================
+    # Stacked posterior histogram
+    # =========================
+    bar!(
+        centers,
+        post_A .+ post_B,  # Bottom layer (full height)
+        bar_width = width,
+        label = "Digit $digit_B",
+        color = :coral
+    )
+    
+    # Add the bottom layer on top
+    bar!(
+        centers,
+        post_A,
+        bar_width = width,
+        label = "Digit $digit_A",
+        color = :steelblue
+    )
+
+    # =========================
+    # Save
+    # =========================
+    filename = ".\\posteriori_theta_normalized_$(digit_A)_$(digit_B).png"
+    savefig(p, filename)
+    println("Image saved at: $filename")
+
+    return p
+end
+
+=== CELL 83 (code) ===
+# ---------------------------------------------------------------------------
+# Posterior driver (base from train, n/m configurable)
+# ---------------------------------------------------------------------------
+all_posteriori = []
+all_posteriori_angles_data = []
+
+function posterior_theta_graph(digitA, digitB; n=900, m=900, base_split=:train, test_split=:test)
+    A_prep, B_prep, media_A_prep, media_B_prep, U_prep, V_prep, D1_prep, D2_prep, H_prep =
+        prepare_data(digitA, digitB; n=n, m=m, split=base_split)
+    angles_A, angles_B, _ = test_classification_balanced(digitA, digitB, D1_prep, D2_prep, H_prep; threshold=1.0, split=test_split)
+    p = plot_posterior_angle_distribution(angles_A, angles_B, digitA, digitB)
+    push!(all_posteriori, p)
+    push!(all_posteriori_angles_data, (digitA=digitA, digitB=digitB, angles_A=angles_A, angles_B=angles_B))
+    return angles_A, angles_B, p
+end
+
+function plot_all_posteriori()
+    n_plots = length(all_posteriori)
+    if n_plots == 0
+        println("No histogram to plot.")
+        return
+    end
+    ncols = min(3, n_plots)
+    nrows = ceil(Int, n_plots / ncols)
+    combined = plot(all_posteriori..., layout=(nrows, ncols), size=(800*ncols, 600*nrows))
+    display(combined)
+    return combined
+end
+
+=== CELL 84 (code) ===
+all_posteriori = []
+all_posteriori_angles_data = []
+
+posterior_theta_graph(1, 5)
+posterior_theta_graph(0, 7)
+posterior_theta_graph(4, 9)
+posterior_theta_graph(3, 9)
+
+plot_all_posteriori()
+
+=== CELL 86 (code) ===
+function visualize_H_optimization(digitA, digitB; radius=3)
+    println("[visualize_H_optimization] Preparing data for digits $digitA and $digitB...")
+    A_prep, B_prep, mean_A_prep, mean_B_prep, U_prep, V_prep, D1_prep, D2_our_prep, H_prep = prepare_data(digitA, digitB)
+    println("[visualize_H_optimization] Separating diagonal components...")
+    d = diag(D1_prep) # Could also be taken from D2_our_prep
+    println("[visualize_H_optimization] Finding extreme values...")
+    shared_indices = find_shared_indices(d)
+    println("[visualize_H_optimization] Plotting extreme vectors of A...")
+    plots_extreme_A = [plot_vec(H_prep[shared_indices[1] + i, :], display=false) for i in 0:(radius-1)]
+    combined_plot_extremes_A = plot(plots_extreme_A..., layout=(1, radius), size=(300*radius,300))
+    display(combined_plot_extremes_A)
+    println("Extreme indices of A: ", shared_indices[1:radius])
+    println("[visualize_H_optimization] Plotting extreme vectors of B...")
+    plots_extreme_B = [plot_vec(H_prep[shared_indices[end] - i, :], display=false) for i in 0:(radius-1)]
+    combined_plot_extremes_B = plot(plots_extreme_B..., layout=(1, radius), size=(300*radius,300))
+    display(combined_plot_extremes_B)
+    println("Extreme indices of B: ", shared_indices[end:-1:end-radius+1])
+    println("[visualize_H_optimization] Plotting candidate PSC vectors...")
+    psc_candidates = highlight_closest(d, sqrt(2)/2,radius)
+    plots_psc_candidates = [plot_vec(H_prep[i, :], display=false) for i in psc_candidates]
+    combined_plot_psc = plot(plots_psc_candidates..., layout=(1, radius), size=(300*radius,300))
+    display(combined_plot_psc)
+    println("Candidate PSC indices: ", psc_candidates)
+
+    return H_prep
+end
+
+function find_shared_indices(d, lower_lim = 0.0, upper_lim = 1.0)
+    shared_indices = []
+    for i in 1:length(d)
+        if d[i] > lower_lim && d[i] < upper_lim
+            push!(shared_indices, i)
+        end
+    end
+    return shared_indices
+end
+
+function save_H_index_images(H, indices)
+    for idx in indices
+        img_vec = H[idx, :]
+        img = reshape(img_vec, (28, 28))
+        heatmap(
+            img[:, end:-1:1]',
+            axis=nothing,
+            colorbar=false,
+            framestyle=:none,
+            aspect_ratio=1,
+            title="H component index $idx",
+            c=:viridis
+        )
+        savefig(".\\H_component_$idx.png")
+    end
+end
+
+=== CELL 92 (code) ===
+function get_all_Fashion_MNIST(clothing_class; split=:test)
+    imgs, labels = FashionMNIST(split=split)[:]
+
+    imgs = Float64.(imgs) ./ 255
+
+    idx = findall(labels .== clothing_class)
+
+    X = hcat([vec(imgs[:, :, i]) for i in idx]...) # place the images as columns
+    return X
+end
+
+
+function create_Fashion_MNIST_matrices(clothing_classA, clothing_classB, n, m)
+
+    imgs, labels = FashionMNIST(split=:train)[:]
+
+     # normalize
+    imgs = Float64.(imgs) ./ 255 
+
+    # find the clothing classes
+    idxA = findall(labels .== clothing_classA)
+    idxB = findall(labels .== clothing_classB)
+
+    # handle errors
+    if length(idxA) < n || length(idxB) < m
+        error("There are not enough images for the chosen clothing classes.")
+    end
+
+    # shuffle the indices
+    Random.seed!(1234)  
+    idxA = Random.shuffle(idxA)[1:n]
+    idxB = Random.shuffle(idxB)[1:m]
+
+     # Vectorize and stack as columns
+    A = hcat([vec(imgs[:, :, i]) for i in idxA]...)
+    B = hcat([vec(imgs[:, :, i]) for i in idxB]...)
+    
+
+    return A, B
+end
+
+function plot_fashion_vector(v)
+    img = reshape(v, (28, 28))
+    heatmap(
+        img[:, end:-1:1]',
+        axis=nothing,
+        colorbar=false,
+        framestyle=:none,
+        aspect_ratio=1,
+        title="Fashion-MNIST image",
+        c=:viridis
+    )
+end
+
+=== CELL 93 (code) ===
+function plot_fashion_angle_histogram(angles_A, angles_B, clothing_class_A, clothing_class_B; 
+                                  bins=30, alpha=0.6, figsize=(1200, 500))
+    
+    # Mapping of indices to clothing class names
+    clothing_class_names = Dict(
+        0 => "T-shirt/top",
+        1 => "Trouser",
+        2 => "Pullover",
+        3 => "Dress",
+        4 => "Coat",
+        5 => "Sandal",
+        6 => "Shirt",
+        7 => "Sneaker",
+        8 => "Bag",
+        9 => "Ankle boot"
+    )
+    
+    # Get the clothing class names
+    nome_A = get(clothing_class_names, clothing_class_A, "Clothing class $clothing_class_A")
+    nome_B = get(clothing_class_names, clothing_class_B, "Clothing class $clothing_class_B")
+    
+    # Compute statistics
+    media_A = mean(angles_A)
+    media_B = mean(angles_B)
+     deviation_A = std(angles_A)
+     deviation_B = std(angles_B)
+    
+    # Create the histogram with both sets - flattened format for the paper
+    p = histogram(angles_A, 
+                 bins=bins, 
+                 alpha=alpha, 
+                 label="$nome_A (σ=$(round( deviation_A, digits=1))°)", 
+                 color=:steelblue,
+                 xlabel="Angle θ (degrees)",
+                 xlims=(0,90),
+                 ylabel="Frequency",
+                 ylims=(0,400),
+                 title="",  # No title - it will be the caption in LaTeX
+                 size=figsize,
+                 # Increase font sizes
+                 guidefontsize=24,
+                 tickfontsize=18,
+                 legendfontsize=16,
+                 left_margin=12Plots.mm,
+                 bottom_margin=12Plots.mm,
+                 right_margin=4Plots.mm,
+                 top_margin=4Plots.mm,
+                 dpi=300,  # High resolution for the paper
+                 framestyle=:box)
+    
+    # Add the second histogram
+    histogram!(p, angles_B, 
+              bins=bins, 
+              alpha=alpha, 
+              label="$nome_B (σ=$(round( deviation_B, digits=1))°)", 
+              color=:coral)
+    
+    # Add vertical lines for the means - thicker and more visible
+    vline!([media_A], 
+           color=:steelblue, 
+           linestyle=:dash, 
+           linewidth=4,
+           label="Mean $nome_A: $(round(media_A, digits=1))°")
+    
+    vline!([media_B], 
+           color=:coral, 
+           linestyle=:dash, 
+           linewidth=4,
+           label="Mean $nome_B: $(round(media_B, digits=1))°")
+    
+    # Position the legend
+    plot!(legend=:topright, 
+          legendfontsize=14,
+          legend_background_color=:white,
+          legend_foreground_color=:black)
+    
+    # Save as PNG
+    filename = ".\\distribution_of_theta_Fashion_$(clothing_class_A)_$(clothing_class_B).png"
+    savefig(p, filename)
+    println("Image saved at: $filename")
+    
+    return p
+end
+
+=== CELL 99 (markdown) ===
+### Fashion-MNIST pairs (balanced)
+
+Same balanced pipeline as the MNIST-digit section, adapted to Fashion-MNIST.
+`classify_balanced_Fashion_set` applies `to_intersection` and uses the
+**reassigned** `D1`/`D2`, so $\theta$ is computed on $\mathrm{col}(A) \cap \mathrm{col}(B)$.
+Reuses `plot_fashion_angle_histogram`, `display_results` and `plot_all_histograms`
+defined above.
+
+=== CELL 100 (code) ===
+# Sample `nA` columns for classA and `mB` columns for classB from `split`.
+# Pass nA == mB for a balanced pair, or nA != mB for an asymmetric one.
+function sample_fashion_pair(classA, classB, nA, mB; split=:train, seed=1234)
+    imgs, labels = FashionMNIST(split=split)[:]
+    imgs = Float64.(imgs) ./ 255
+
+    idxA = findall(labels .== classA)
+    idxB = findall(labels .== classB)
+
+    if length(idxA) < nA || length(idxB) < mB
+        error("Not enough Fashion images (need $nA of $classA, $mB of $classB; have $(length(idxA)), $(length(idxB)) in split=$split).")
+    end
+
+    Random.seed!(seed)
+    idxA = Random.shuffle(idxA)[1:nA]
+    idxB = Random.shuffle(idxB)[1:mB]
+
+    A = hcat([vec(imgs[:, :, i]) for i in idxA]...)
+    B = hcat([vec(imgs[:, :, i]) for i in idxB]...)
+    return A, B
+end
+
+function balanced_count_fashion(classA, classB; split=:test)
+    _, labels = FashionMNIST(split=split)[:]
+    return min(length(findall(labels .== classA)), length(findall(labels .== classB)))
+end
+
+=== CELL 101 (code) ===
+# Build the Fashion-MNIST GSVD base from `split` (default :train) using `n`
+# samples of classA and `m` samples of classB. n == m -> balanced base;
+# n != m -> asymmetric. Returns the 9-tuple (centered A, B, means, GSVD factors).
+function prepare_Fashion_data(classA, classB; n=900, m=800, split=:train, seed=1234)
+    A_local, B_local = sample_fashion_pair(classA, classB, n, m; split=split, seed=seed)
+    media_A_local = mean(A_local, dims=2) |> vec
+    media_B_local = mean(B_local, dims=2) |> vec
+    A_centered = A_local .- media_A_local
+    B_centered = B_local .- media_B_local
+    U_svd, V_til_svd, H_svd, D1_til_svd, D2_til_svd, D1_svd, D2_our_svd, bl, br, wl, wr, rv, P, Vo = Our_SVD(A_centered', B_centered')
+    U_s, V_s, D1_til_s, D2_til_s, D1_s, D2_our_s, H_s = sort_and_rebuild(
+        U_svd, V_til_svd, D1_svd, D2_our_svd, D1_til_svd, D2_til_svd, H_svd, bl, br, wl, wr, rv)
+    return A_centered, B_centered, media_A_local, media_B_local, U_s, V_s, D1_s, D2_our_s, H_s
+end
+
+=== CELL 102 (code) ===
+function classify_balanced_Fashion_set(X, expected_class, D1, D2, H; threshold=1.0, expected_side=:A)
+    D1, D2 = to_intersection(D1, D2)   # restrict theta(z) to col(A) cap col(B); use the reassigned D1/D2
+
+    hits = 0
+    total = size(X, 2)
+    angles = Float64[]
+
+    println("Classifying $total balanced images of clothing class $expected_class...")
+
+    for i in 1:total
+        v = X[:, i]
+        c = vec(H' \ v)
+        w1 = D1 * c
+        w2 = D2 * c
+        ratio = norm(w2) / norm(w1)
+
+        theta_deg = atan(norm(w2), norm(w1)) * (180 / pi)
+        push!(angles, theta_deg)
+
+        prediction = expected_side == :A ? (ratio < threshold ? expected_class : -1) :
+                                            (ratio > threshold ? expected_class : -1)
+        if prediction == expected_class
+            hits += 1
+        end
+    end
+
+    return hits, hits / total, angles, mean(angles), std(angles)
+end
+
+function test_Fashion_classification_balanced(classA, classB, D1, D2, H; threshold=1.0, split=:test, seed=4321)
+    n_test = balanced_count_fashion(classA, classB; split=split)
+    println("Testing balanced Fashion classification between $classA and $classB ($n_test instances each, split=$split).")
+    X_A, X_B = sample_fashion_pair(classA, classB, n_test, n_test; split=split, seed=seed)
+
+    hits_A, acc_A, angles_A, mean_A, dev_A = classify_balanced_Fashion_set(X_A, classA, D1, D2, H; threshold=threshold, expected_side=:A)
+    display_results(classA, hits_A, n_test, acc_A, mean_A, dev_A)
+
+    hits_B, acc_B, angles_B, mean_B, dev_B = classify_balanced_Fashion_set(X_B, classB, D1, D2, H; threshold=threshold, expected_side=:B)
+    display_results(classB, hits_B, n_test, acc_B, mean_B, dev_B)
+
+    overall = (hits_A + hits_B) / (2 * n_test)
+    println("\n=== Balanced Overall Summary ===")
+    println("Overall accuracy: $(round(overall * 100, digits=2))%")
+    return angles_A, angles_B, overall
+end
+
+=== CELL 103 (code) ===
+# n == m -> balanced base ; n != m -> asymmetric base (e.g. n=900, m=800).
+function classify_more_Fashion_balanced(classA, classB; n=900, m=900, base_split=:train, test_split=:test,
+                                        base_seed=1234, test_seed=4321, threshold=1.0)
+    A_prep, B_prep, media_A_prep, media_B_prep, U_prep, V_prep, D1_prep, D2_prep, H_prep =
+        prepare_Fashion_data(classA, classB; n=n, m=m, split=base_split, seed=base_seed)
+    println("[classify_more_Fashion_balanced] Base from split=$base_split with n=$n ($classA), m=$m ($classB).")
+
+    angles_A, angles_B, overall = test_Fashion_classification_balanced(
+        classA, classB, D1_prep, D2_prep, H_prep; threshold=threshold, split=test_split, seed=test_seed)
+
+    p = plot_fashion_angle_histogram(angles_A, angles_B, classA, classB)
+    push!(all_histograms, p)
+    push!(all_angles_data, (clothing_classA=classA, clothing_classB=classB, angles_A=angles_A, angles_B=angles_B))
+    return angles_A, angles_B, overall, p
+end
+
+function save_all_Fashion_angles_to_csv(filename="angles_results_fashion.csv")
+    if isempty(all_angles_data)
+        println("No data to save.")
+        return
+    end
+    rows = []
+    for data in all_angles_data
+        for ang in data.angles_A
+            push!(rows, (clothing_classA=data.clothing_classA, clothing_classB=data.clothing_classB, clothing_class=data.clothing_classA, angle=ang))
+        end
+        for ang in data.angles_B
+            push!(rows, (clothing_classA=data.clothing_classA, clothing_classB=data.clothing_classB, clothing_class=data.clothing_classB, angle=ang))
+        end
+    end
+    df = DataFrame(rows)
+    CSV.write(filename, df)
+    println("Data saved to $filename")
+    return df
+end
+
+=== CELL 104 (code) ===
+# 0 T-shirt/top, 2 Pullover, 3 Dress, 4 Coat, 7 Sneaker, 9 Ankle boot
+fashion_pairs = [(0, 4), (2, 3), (7, 9), (0, 7)]
+
+# reset accumulators so previous runs don't bleed in
+all_histograms = []
+all_angles_data = []
+
+for (cA, cB) in fashion_pairs
+    println("\n>>> Fashion pair: $cA vs $cB")
+    classify_more_Fashion_balanced(cA, cB)
+end
+
+plot_all_histograms()
+save_all_Fashion_angles_to_csv("angles_results_all_pairs_fashion.csv")
+
+=== CELL 106 (code) ===
+function classify_all_A_matrix(A, digit_A, D1, D2, H; threshold=1.0) 
+    D1, D2 = to_intersection(D1, D2)  # restrict theta(z) to col(A) cap col(B)
+    # A must be a matrix where each row is a vector to be classified
+    # Transpose A so that each column is a vector
+    X = A
+    
+    acertos = 0 
+    total = size(X, 2) 
+    angles = Float64[]  # Array to store the angles
+    
+    print("Classifying $total vectors from matrix A as digit $digit_A...\n") 
+ 
+    for i in 1:total 
+        v = X[:, i] 
+        c = vec(H' \ v)  # least squares 
+        w1 = D1 * c 
+        w2 = D2 * c 
+        ratio = norm(w2) / norm(w1) 
+        
+        # Compute the angle in degrees
+        theta_rad = atan(norm(w2), norm(w1))
+        theta_deg = theta_rad * (180 / π)
+        push!(angles, theta_deg)
+ 
+        # decision rule with an indecision zone 
+        predicao = ratio < threshold ? digit_A : -1  
+        if predicao == digit_A 
+            acertos += 1 
+        end 
+    end 
+    
+    # Compute angle statistics
+    media_angles = mean(angles)
+     deviation_angles = std(angles)
+    accuracy = acertos / total
+ 
+    return acertos, accuracy, angles, media_angles,  deviation_angles
+end
+
+function classify_all_B_matrix(B, digit_B, D1, D2, H; threshold=1.0) 
+
+    D1, D2 = to_intersection(D1, D2)  # restrict theta(z) to col(A) cap col(B)
+    # B must be a matrix where each row is a vector to be classified
+    # Transpose B so that each column is a vector
+    X = B
+    
+    acertos = 0 
+    total = size(X, 2) 
+    angles = Float64[]  # Array to store the angles
+    
+    print("Classifying $total vectors from matrix B as digit $digit_B...\n") 
+ 
+    for i in 1:total 
+        v = X[:, i] 
+        c = vec(H' \ v)  # least squares 
+        w1 = D1 * c 
+        w2 = D2 * c 
+        ratio = norm(w2) / norm(w1) 
+        
+        # Compute the angle in degrees
+        theta_rad = atan(norm(w2), norm(w1))
+        theta_deg = theta_rad * (180 / π)
+        push!(angles, theta_deg)
+ 
+        # decision rule with an indecision zone 
+        predicao = ratio > threshold ? digit_B : -1 
+        if predicao == digit_B 
+            acertos += 1 
+        end 
+    end 
+    
+    # Compute angle statistics
+    media_angles = mean(angles)
+     deviation_angles = std(angles)
+    accuracy = acertos / total
+ 
+    return acertos, accuracy, angles, media_angles,  deviation_angles
+end
+
+# Helper function to display the results in an organized way
+function display_results(nome_digit, acertos, total, accuracy, media_angles,  deviation_angles)
+    println("\n=== Results for digit $nome_digit ===")
+    println("Correct: $acertos out of $total")
+    println("Accuracy: $(round(accuracy * 100, digits=2))%")
+    println("Mean of the angles: $(round(media_angles, digits=2))°")
+    println("Standard deviation of the angles: $(round( deviation_angles, digits=2))°")
+end
+
+# Version that uses matrices A and B
+function test_matrix_classification(A, B, digit_A, digit_B, D1, D2, H; threshold=1.0)
+    println("Testing classification between digits $digit_A and $digit_B using matrices A and B")
+    
+    # Test matrix A
+    acertos_A, accuracy_A, angles_A, media_A,  deviation_A = classify_all_A_matrix(A, digit_A, D1, D2, H; threshold=threshold)
+    total_A = length(angles_A)
+    display_results(digit_A, acertos_A, total_A, accuracy_A, media_A,  deviation_A)
+    
+    # Test matrix B  
+    acertos_B, accuracy_B, angles_B, media_B,  deviation_B = classify_all_B_matrix(B, digit_B, D1, D2, H; threshold=threshold)
+    total_B = length(angles_B)
+    display_results(digit_B, acertos_B, total_B, accuracy_B, media_B,  deviation_B)
+    
+    # Accuracy geral
+    accuracy_geral = (acertos_A + acertos_B) / (total_A + total_B)
+    println("\n=== Overall Summary ===")
+    println("Overall accuracy: $(round(accuracy_geral * 100, digits=2))%")
+    
+    return (angles_A, angles_B, accuracy_geral)
+end
+
+=== CELL 109 (code) ===
+p = plot_angle_histogram(angles_A, angles_B, 4, 9)
+
+=== CELL 112 (code) ===
+p2 = plot_angle_histogram(angles_A_reduced, angles_B_reduced, 4, 9)
+
+=== CELL 113 (markdown) ===
+## Per-pair classification metrics (balanced)
+
+Re-runs the balanced pipeline for the four paper pairs and derives
+precision / recall / F1 per class (decision rule: predict digit $A$ iff
+$\theta < 45^\circ$, i.e. ratio $< 1$) plus overall accuracy. Linear CKA between
+the centered $A$ and $B$ is reported as a single-number reference baseline.
+
+=== CELL 114 (code) ===
+#=
+metrics_from_angles
+
+INPUT:  angles_A::Vector{Float64}  -- theta angles for true-class-A samples
+        angles_B::Vector{Float64}  -- theta angles for true-class-B samples
+        theta_threshold_deg::Float64  (default 45) -- decision boundary in degrees
+
+GOAL:   Treat the angle distributions as a binary classifier with decision
+        rule: predict class A iff theta < threshold (equivalent to ratio < 1
+        when threshold_deg = 45). Counts TP/FN/FP per class and returns
+        precision, recall, F1 per class plus the overall accuracy.
+
+OUTPUT: NamedTuple with fields accuracy, precision_A, recall_A, f1_A,
+        precision_B, recall_B, f1_B.
+=#
+function metrics_from_angles(angles_A, angles_B; theta_threshold_deg=45.0)
+    nA = length(angles_A)
+    nB = length(angles_B)
+
+    TP_A = count(<(theta_threshold_deg),  angles_A)   # truly A, predicted A
+    FN_A = nA - TP_A                                   # truly A, predicted B
+    TP_B = count(>=(theta_threshold_deg), angles_B)   # truly B, predicted B
+    FN_B = nB - TP_B                                   # truly B, predicted A
+
+    FP_A = FN_B    # truly B but predicted A
+    FP_B = FN_A    # truly A but predicted B
+
+    safe_div(a, b) = b == 0 ? 0.0 : a / b
+    safe_f1(p, r)  = (p + r) == 0 ? 0.0 : 2 * p * r / (p + r)
+
+    precision_A = safe_div(TP_A, TP_A + FP_A)
+    recall_A    = safe_div(TP_A, nA)
+    f1_A        = safe_f1(precision_A, recall_A)
+
+    precision_B = safe_div(TP_B, TP_B + FP_B)
+    recall_B    = safe_div(TP_B, nB)
+    f1_B        = safe_f1(precision_B, recall_B)
+
+    accuracy = (TP_A + TP_B) / (nA + nB)
+
+    return (; accuracy,
+              precision_A, recall_A, f1_A,
+              precision_B, recall_B, f1_B)
+end
+
+
+=== CELL 116 (code) ===
+paper_pairs = [(1, 5), (0, 7), (4, 9), (3, 9)]
+
+# reset accumulators so previous runs don't bleed into the table
+all_histograms = []
+all_angles_data = []
+
+metrics_rows = []
+for (dA, dB) in paper_pairs
+    println("\n>>> Pair: digits $dA vs $dB")
+
+    A_prep, B_prep, media_A_prep, media_B_prep,
+        U_prep, V_prep, D1_prep, D2_prep, H_prep = prepare_data(dA, dB; n=900, m=900, split=:train)
+
+    angles_A, angles_B, _ = test_classification_balanced(dA, dB, D1_prep, D2_prep, H_prep; threshold=1.0, split=:test)
+    p = plot_angle_histogram(angles_A, angles_B, dA, dB)
+    push!(all_histograms, p)
+    push!(all_angles_data, (digitA=dA, digitB=dB, angles_A=angles_A, angles_B=angles_B))
+
+    cka = linear_cka(A_prep, B_prep)
+    m   = metrics_from_angles(angles_A, angles_B)
+
+    for (cls, prec, rec, f1_) in [(dA, m.precision_A, m.recall_A, m.f1_A),
+                                  (dB, m.precision_B, m.recall_B, m.f1_B)]
+        push!(metrics_rows, (
+            pair             = "$dA vs $dB",
+            class            = "digit $cls",
+            precision        = prec,
+            recall           = rec,
+            f1               = f1_,
+            accuracy_overall = m.accuracy,
+            cka              = cka,
+        ))
+    end
+end
+
+metrics_df = DataFrame(metrics_rows)
+for col in (:precision, :recall, :f1, :accuracy_overall, :cka)
+    metrics_df[!, col] = round.(metrics_df[!, col], digits=4)
+end
+display(metrics_df)
+CSV.write("metrics_paper_pairs.csv", metrics_df)
+println("\nSaved metrics_paper_pairs.csv")
